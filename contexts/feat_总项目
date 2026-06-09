@@ -1,0 +1,32 @@
+# 日期
+创建于2026/06/01
+
+# 👌项目中新的知识点：
+## BRVAH（BaseRecyclerViewAdapterHelper） 库
+1.创建adpter:BaseQuickAdapter<xxxx, BaseViewHolder> ,xxx是数据类，BaseViewHodler是Hodler
+2.重载override fun convert(holder: BaseViewHolder, item: User) ~~~ onBindViewHolder
+3.具体好处：以后再说，先用![alt text](image-4.png)
+
+
+# 🤩项目中的关键代码功能：
+
+## 整理文案
+1.有一个方法就是动态映射文案的方法，getTextByKey
+---
+
+## sign签名字段来源
+1.有很多接口Post的body是有sign签名的，包装在`ApiClient`(com/homerunpet/engine/ApiClient.java)里面，拼接请求参数，SH256
+```java
+```
+---
+
+
+## 强制绑定，只有同地区才能实现，否则一定要解绑
+
+## 重新链接，这个功能一直没弄明白
+
+## ble读取那个MTU字节的你也没看懂
+
+## 域名和国家地区那个逻辑也没看懂
+
+## 视频rawv转码MP4  [RawvConverter]
