@@ -543,7 +543,23 @@ object DevicePropertyConstants {
 
 ---
 
+不对，75v上报的数据
+ "current_task": {
+        "task_status": 1,
+        "task_type": 6
+    },
 
+      val currentTaskObj = result[DevicePropertyConstants.CURRENT_TASK]
+       if (currentTaskObj is Map<*, *>) {
+                taskTypeCode = (currentTaskObj[DevicePropertyConstants.TASK_TYPE] as? Number)?.toInt() ?: 0
+                taskStatusCode = (currentTaskObj[DevicePropertyConstants.TASK_STATUS] as? Number)?.toInt() ?: 0
+            }
+
+            this.taskType = DeviceTaskType.fromCode(taskTypeCode)
+            this.taskStatus = DeviceTaskStatus.fromCode(taskStatusCode)
+
+        然后这个数据呀对应，靠啊
+，
 # 实现4.根据物模型task_type任务类型控制底部操作栏运行UI
 
 5.26
@@ -952,7 +968,355 @@ object DevicePropertyConstants {
         }
     }
 
+
+
+
 ```
+## 接口数据
+onPropertyUpdate()的result数据来源,以下两个方法弄出来的
+
+所以那个
+handleDeviceTaskStatus(result: Map<String, Any?>) {
+    currentTaskObj = result[DevicePropertyConstants.CURRENT_TASK]
+看调用handleDeviceTaskStatus的方法有以下onPropertyUpdate()\invokeCatLitterService()
+invokeCatLitterService()只是单独的一个方法，是在点击操作方法里面被调用的
+
+//HmCommonNetUtils
+```java
+/**
+     * 查询设备属性
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun fetchDeviceProperty(
+        lifecycleOwner: LifecycleOwner,
+        deviceName: String,
+        callback: HmNetworkCallback<Map<String, Any?>>,
+        isHandlerError: Boolean = false,
+        useCache: Boolean = true,
+    ) {
+        lifecycleOwner.scopeNetLife {
+            // 网络请求（并写入缓存）
+            val data = Get<Map<String, Any?>>(HmApi.getDeviceProperty(deviceName)) {
+                setCacheKey("device_prop_$deviceName")
+                setCacheMode(CacheMode.WRITE)
+            }.await()
+            callback.onSuccess(data)
+        }.let { scope ->
+            if (useCache) {
+                scope.preview {
+                    // 先读取缓存
+                    val cachedData = Get<Map<String, Any?>>(HmApi.getDeviceProperty(deviceName)) {
+                        setCacheKey("device_prop_$deviceName")
+                        setCacheMode(CacheMode.READ)
+                    }.await()
+                    callback.onSuccess(cachedData)
+                }.catch { }
+            }
+            scope
+        }.catch {
+            if (it is Exception) {
+                callback.onError(it)
+            }
+            if (isHandlerError) {
+                handleError(it)
+            }
+        }
+    }
+
+```
+
+---
+
+HRBaseDeviceActivity
+```java
+
+   */
+    protected fun fetchDeviceProperty(useCache: Boolean = true) {
+        val serial = deviceSerial.uppercase()
+        HmCommonNetUtils.fetchDeviceProperty(
+            this, serial,
+            object : HmNetworkCallback<Map<String, Any?>> {
+                override fun onSuccess(result: Map<String, Any?>) {
+                    // 统一提取实时在线状态
+                    if (result.containsKey(DevicePropertyConstants.ONLINE_STATUS)) {
+                        status = if (result[DevicePropertyConstants.ONLINE_STATUS].toSafeBoolean()) 1 else 0
+                    }
+                    onPropertyUpdate(result)
+                }
+
+                override fun onError(error: Exception) {
+                    onPropertyError(error)
+                }
+            }, useCache = useCache
+        )
+    }
+```
+
+
+onPropertyUpdate()
+```java
+ override fun onPropertyUpdate(result: Map<String, Any?>) {
+        mBind.prlContent.finishRefresh()
+        // 状态映射：区分“实时传感器数据”与“用户受控状态”
+        Log.d("PropertyKeys", "all keys=${result.keys}")
+        Log.d("PropertyUpdate", "llNewUi visibility=${mBind.llNewUi.visibility}")
+        mBind.llNewUi.post {
+            Log.d("UICheck", "llNewUi height=${mBind.llNewUi.height}, width=${mBind.llNewUi.width}")
+            Log.d("UICheck", "tvSandBinValue text=${mBind.tvSandBinValue.text}")
+            Log.d("UICheck", "tvSandReplenishmentBucketValue text=${mBind.tvSandReplenishmentBucketValue.text}")
+            Log.d("UICheck", "tvToiletWasteTankValue text=${mBind.tvToiletWasteTankValue.text}")
+        }
+        // --- A. 传感器数据更新 (仅当数据变动时更新 UI 文字/颜色) ---
+
+        if (result.containsKey(DevicePropertyConstants.TOILET_LITTER_STATUS)) {
+            val toiletRemainStatus = result[DevicePropertyConstants.TOILET_LITTER_STATUS].toSafeBoolean()
+
+            mBind.tvLitterAmountValue.text =
+                if (toiletRemainStatus) getString(R.string.catlitterbox_label_sufficient) else getString(R.string.catlitterbox_label_insufficient)
+            mBind.tvLitterAmountValue.setTextColor(if (toiletRemainStatus) getCompatColor(R.color.color_383231) else getCompatColor(R.color.color_ff2742))
+
+            //100a+ 砂仓余量
+            mBind.tvSandBinValue.text=
+                if (toiletRemainStatus) getString(R.string.catlitterbox_label_sufficient) else getString(R.string.catlitterbox_label_insufficient)
+            mBind.tvSandBinValue.setTextColor(if (toiletRemainStatus) getCompatColor(R.color.color_383231) else getCompatColor(R.color.color_ff2742))
+
+        }
+
+        //100a+补砂桶余量
+        if(result.containsKey(DevicePropertyConstants.REFILL_LITTER_STATUS)){
+            val refillRemainStatus=result[DevicePropertyConstants.REFILL_LITTER_STATUS].toSafeBoolean()
+            mBind.tvSandReplenishmentBucketValue.text=
+                if(refillRemainStatus)getString(R.string.catlitterbox_label_sufficient) else getString(R.string.catlitterbox_label_insufficient)
+            mBind.tvSandReplenishmentBucketValue.setTextColor(if (refillRemainStatus) getCompatColor(R.color.color_383231) else getCompatColor(R.color.color_ff2742))
+
+        }
+
+        if (result.containsKey(DevicePropertyConstants.WASTE_BIN_FULL_STATUS)) {
+            val wasteBinStatus = result[DevicePropertyConstants.WASTE_BIN_FULL_STATUS].toSafeBoolean()
+            mBind.tvToiletBoxValue.text =
+                if (wasteBinStatus) getString(R.string.common_text_notEnough) else getString(R.string.catLitterBox_text_normal)
+            mBind.tvToiletBoxValue.setTextColor(if (wasteBinStatus) getCompatColor(R.color.color_ff2742) else getCompatColor(R.color.color_383231))
+
+            //100a+集便箱门
+            mBind.tvToiletWasteTankValue.text=
+                if (wasteBinStatus) getString(R.string.common_text_notEnough) else getString(R.string.catLitterBox_text_normal)
+            mBind.tvToiletWasteTankValue.setTextColor(if (wasteBinStatus) getCompatColor(R.color.color_ff2742) else getCompatColor(R.color.color_383231))
+        }
+
+
+        // --- B. 受动作保护的状态（根据是否有指令下发后的保护期决定是否更新） ---
+        if (isActionProtecting()) {
+            // 保护期内：忽略可能包含旧数据的属性上报，仅根据最新在线状态刷新标题
+            updateTitleStatus()
+        } else {
+            // 正常期：全量同步任务状态及各项开关设置
+
+            // 核心任务流解析
+            handleDeviceTaskStatus(result)  //将这个result传入到核心控制显示底部UI的方法
+
+            // 同步基础设置状态（仅用于各入口 Summary 显示或状态同步）
+            if (result.containsKey(DevicePropertyConstants.AUTO_CLEAN)) {
+                (result[DevicePropertyConstants.AUTO_CLEAN] as? Map<*, *>)?.let { struct ->
+                    this.isAutoCleanEnabled = struct[DevicePropertyConstants.SWITCH].toSafeBoolean()
+                }
+            }
+
+            if (result.containsKey(DevicePropertyConstants.KITTEN_MODE_SWITCH)) {
+                this.isKittenModeEnabled = result[DevicePropertyConstants.KITTEN_MODE_SWITCH].toSafeBoolean()
+            }
+
+            if (result.containsKey(DevicePropertyConstants.AUTO_COVER_SWITCH)) {
+                this.isAutoBuryEnabled = result[DevicePropertyConstants.AUTO_COVER_SWITCH].toSafeBoolean()
+            }
+
+            if (result.containsKey(DevicePropertyConstants.FAN_SPEED)) {
+                this.fanSpeed = result[DevicePropertyConstants.FAN_SPEED].toSafeInt(2)
+                this.isFanEnabled = this.fanSpeed > 0
+            }
+        }
+
+        // 摄像头配套属性同步 (不受操作保护限制)
+        if (hasCamera) {
+            if (result.containsKey(DevicePropertyConstants.FILL_LIGHT_SWITCH)) {
+                this.isFillLightOn = result[DevicePropertyConstants.FILL_LIGHT_SWITCH].toSafeBoolean()
+                hrTuTkLiveStreamFragment?.updateFillLightStatus(isFillLightOn)
+            }
+
+            if (result.containsKey(DevicePropertyConstants.CAMERA_SWITCH)) {
+                this.isCameraOn = result[DevicePropertyConstants.CAMERA_SWITCH].toSafeBoolean()
+                hrTuTkLiveStreamFragment?.updateCameraSwitch(isCameraOn)
+            }
+
+            if (result.containsKey(DevicePropertyConstants.MIC_SWITCH)) {
+                this.isMicOn = result[DevicePropertyConstants.MIC_SWITCH].toSafeBoolean()
+                hrTuTkLiveStreamFragment?.updateMicStatus(isMicOn)
+            }
+
+            if (result.containsKey(DevicePropertyConstants.CAMERA_STATUS)) {
+                this.cameraStatus = result[DevicePropertyConstants.CAMERA_STATUS].toSafeInt(1)
+                hrTuTkLiveStreamFragment?.updateCameraStatus(cameraStatus)
+            }
+        }
+        updateFragmentStatus()
+
+        // 离线遮罩逻辑
+        val isOnline = checkOnline(showToast = false)
+        mBind.vOutlineBottomControl.visibility = if (!isOnline) View.VISIBLE else View.GONE
+        mBind.vOutlineCurrentTask.visibility = if (!isOnline && mBind.sllCurrentTask.visibility == View.VISIBLE) View.VISIBLE else View.GONE
+    }
+```
+
+---
+handleActionClick(model: ActionItem) 
+```java
+     /**
+     * 快捷操作点击事件
+     */
+    private fun handleActionClick(model: ActionItem) {
+        if (!checkDeviceOperable()) return
+        if (isCatInside) {
+            Toaster.show(R.string.catlitterbox_toast_cat_inside_operable)
+            return
+        }
+        if (isCatNear) {
+            Toaster.show(R.string.catlitterbox_toast_cat_near_operable)
+            return
+        }
+        when (model.identifier) {
+            // 立即清理
+            "remote_clean" -> {
+                XPopup.Builder(this).asCustom(
+                    HMCommonDialogActionAllTitleTwoBtn(
+                        this,
+                        isShowTitle = false,
+                        content = getString(R.string.catlitterbox_text_confirm_clean_content),
+                        title = ""
+                    )
+                        .apply {
+                            rightClickMethod = {
+                                invokeCatLitterService(
+                                    "remote_clean",
+                                    actionName = getString(R.string.catlitterbox_text_clean),
+                                    mockTaskType = DeviceTaskType.CLEANING.code,
+                                    mockTaskStatus = DeviceTaskStatus.RUNNING.code
+                                )
+                                dismiss()
+                            }
+                            leftClickMethod = {
+                                dismiss()
+                            }
+                        }
+                ).show()
+            }
+
+            // 铺平
+            "remote_level" -> {
+                XPopup.Builder(this).asCustom(
+                    HMCommonDialogActionAllTitleTwoBtn(
+                        this,
+                        isShowTitle = false,
+                        content = getString(R.string.catlitterbox_text_confirm_level_content),
+                        title = ""
+                    )
+                        .apply {
+                            rightClickMethod = {
+                                invokeCatLitterService(
+                                    "remote_level",
+                                    actionName = getString(R.string.catlitterbox_text_level),
+                                    mockTaskType = DeviceTaskType.SMOOTHING.code,
+                                    mockTaskStatus = DeviceTaskStatus.RUNNING.code
+                                )
+                                dismiss()
+                            }
+                            leftClickMethod = {
+                                dismiss()
+                            }
+                        }
+                ).show()
+            }
+
+            // 清空猫砂
+            "remote_empty" -> showEmptyCatLitterDialog()
+
+            //开口朝上[服务]
+            "remote_open_up"->{
+                XPopup.Builder(this).asCustom(
+                    HMCommonDialogActionAllTitleTwoBtn(
+                        this,
+                        isShowTitle = false,
+                        content = getString(R.string.catlitterbox_text_confirm_open_up_content),
+                        title = ""
+                    )
+                        .apply {
+                            rightClickMethod = {
+                                invokeCatLitterService(
+                                    "remote_open_up",
+                                    actionName = getString(R.string.catLitterBox_text_openUpwards),
+//                                    mockTaskType = DeviceTaskType.SMOOTHING.code,
+                                    mockTaskStatus = DeviceTaskStatus.RUNNING.code
+                                )
+                                dismiss()
+                            }
+                            leftClickMethod = {
+                                dismiss()
+                            }
+                        }
+                ).show()
+
+            }
+```
+
+invokeCatLitterService()
+```java
+/**
+     * 合并统一下发猫砂盆各项服务指令（包含设备返回状态的统一校验，result == 0 时才认为成功并执行状态模拟）
+     * @param serviceId  服务标识 (e.g. "remote_clean", "remote_level", "remote_control_task")
+     * @param params     附加参数
+     * @param actionName 操作名称 (用于 Toast 成功提示)，为空则不提示
+     * @param mockTaskType   回调成功后模拟的 task_type，为空则不模拟
+     * @param mockTaskStatus 回调成功后模拟的 task_status，为空则不模拟
+     */
+    private fun invokeCatLitterService(
+        serviceId: String,
+        params: Map<String, Any?> = mapOf(),
+        actionName: String? = null,
+        mockTaskType: String? = null,
+        mockTaskStatus: Int? = null
+    ) {
+        invokeDeviceService(serviceId, params, object : HmNetworkCallback<Any?> {
+            override fun onSuccess(result: Any?) {
+                if (result is Map<*, *>) {
+                    val resultCode = (result["result"] as? Number)?.toInt() ?: -1
+                    if (resultCode == 0) {
+                        // 1. 成功了才进入防回跳状态
+                        markActionTime()
+
+                        // 2. 如果传了提示名，则 Toast 提示
+                        actionName?.let { Toaster.show(getString(R.string.catlitterbox_text_command_sent_to_device, it)) }
+                        if (mockTaskType != null && mockTaskStatus != null) {
+                            handleDeviceTaskStatus(
+                                mapOf(
+                                    DevicePropertyConstants.CURRENT_TASK to mapOf(
+                                        DevicePropertyConstants.TASK_TYPE to mockTaskType,
+                                        DevicePropertyConstants.TASK_STATUS to mockTaskStatus
+                                    )
+                                )
+                            )
+                        }
+                    } else {
+                        Toaster.show(CatLitterBoxTaskResult.getMsg(resultCode))
+                    }
+                }
+            }
+
+            override fun onError(error: Exception) {
+            }
+        })
+    }
+```
+
+---
 # 实现5.修改跳转进HRCatLitterBoxActivity设置页面
 
 逻辑：是通过pk来决定调用的是哪一个设置页面
@@ -1171,3 +1535,25 @@ object ProductUtils {
                 startActivity(intent)
             }  }
 ```
+
+
+查过接口了，补砂是成功返回的
+![alt text](image-6.png)
+但是数据太快了，轮询查属性
+
+难道是下发返回多了一个字段result？但是这个 this.taskType = DeviceTaskType.fromCode(taskTypeCode)，是根据属性返回的啊
+                val rawTaskType = currentTaskObj[DevicePropertyConstants.TASK_TYPE]
+                taskTypeCode = getTaskTypeCodeFromSpecs(rawTaskType)
+![alt text](image-7.png)
+
+
+维护就是开口朝上
+1.原来的取消按钮样式转换成复位，在task_type=5 && task_status=1），这个复位按钮是灰的，
+    维护类型中，task_type=5
+    1.1 任务状态task_status=1  || task_status=2  ，复位是灰的
+
+2.等状态是（task_type=5 && task_status=0），复位按钮可以点击，并且暂停和继续按钮隐藏，并且中间的文字改成已完成开口朝上
+3.开口复位中是task_type=6，并且复位按钮消失，暂停和继续按钮显示
+
+1.已完成开口朝上的任务面板修改分支 🆗
+2.复位按钮是之前

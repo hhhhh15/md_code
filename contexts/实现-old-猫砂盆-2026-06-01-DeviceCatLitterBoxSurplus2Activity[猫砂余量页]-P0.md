@@ -224,6 +224,13 @@
 ---
 
 //等一下，这个有些调用ApiService的不全是要替换的接口，需要查看发送请求的时候有没有发送sign签名,有的，说明是新接口，旧的接口是没有这个sign参数的.所以下面这个在DeviceCatLitterBoxSurplusActivity中的接口方法是新接口
+
+————————————0611不对不对，不是看sign，是看域名，如果是[api.](https://api.homerunsmart.com)是旧接口，如果是app.homerunsmart.com是新接口
+所以这个页面里面很多要换新接口，
+设备维护接口是
+    // 获取设备维护项
+    fun getDeviceMaintain(device_name: String) = "/v1/devices/${device_name}/maintenances"
+
 ```java
 
 //ApiClient (com/homerunpet/engine/ApiClient.java)
@@ -303,6 +310,288 @@
     }
 }
 
+```
+
+0611
+```java
+// api
+    // 设备维护列表
+    private void devicesMaintainList() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        params.put("devicesProductId", device_model.getDevicesProductId());
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.devicesMaintainList(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<DevicesMaintainListModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull DevicesMaintainListModel model) {
+
+                        for (int i = 0; i < model.getData().getList().size(); i++) {
+                            if (type == 0) { // 猫砂
+                                if (model.getData().getList().get(i).getEventKey().equals("message_sandSiloCleaning")) {
+                                    eventKey = model.getData().getList().get(i).getEventKey();
+                                    resetDate = model.getData().getList().get(i).getResetDate();
+                                    days = model.getData().getList().get(i).getDays();
+                                    sysDays = model.getData().getList().get(i).getSysDays();
+                                    useDays = model.getData().getList().get(i).getUseDays();
+                                }
+                            } else { // 集便器
+                                if (model.getData().getList().get(i).getEventKey().equals("message_toiletCleaning")) {
+                                    eventKey = model.getData().getList().get(i).getEventKey();
+                                    resetDate = model.getData().getList().get(i).getResetDate();
+                                    days = model.getData().getList().get(i).getDays();
+                                    sysDays = model.getData().getList().get(i).getSysDays();
+                                    useDays = model.getData().getList().get(i).getUseDays();
+                                }
+                            }
+                        }
+
+                        int surplusDays = 0;
+                        if (days < sysDays) { // 判断提醒天数与默认提醒天数 按天数小的来判断
+                            surplusDays = days - useDays;
+                        } else {
+                            surplusDays = sysDays - useDays;
+                        }
+
+                        int noticeSurplusDays = days - useDays;
+
+                        switch (eventKey) {
+                            case "message_sandSiloCleaning":
+                                if (noticeSurplusDays > 0) { // 剩余天数大于0 “已使用2天，建议1天后清洗”
+                                    noticeStr = String.format(getString(
+                                            R.string.catLitterBox_text_ItHasBeenUsedForXDaysItIsRecommendedToCleanItAfterYDays),
+                                            useDays, noticeSurplusDays);
+                                } else {
+                                    noticeStr = String.format(getString(
+                                            R.string.catLitterBox_text_itHasBeenUsedForXDaysAndProlongedKackOfCleaningCanLeadToTheProliferationOfBacteria),
+                                            useDays);
+                                }
+                                break;
+                            case "message_toiletCleaning":
+                                if (noticeSurplusDays > 0) { // 剩余天数大于0 “已使用2天，建议1天后清洗”
+                                    noticeStr = String.format(getString(
+                                            R.string.catLitterBox_text_ItHasBeenUsedForXDaysItIsRecommendedToCleanItAfterYDays),
+                                            useDays, noticeSurplusDays);
+                                } else {
+                                    noticeStr = String.format(getString(
+                                            R.string.catLitterBox_text_itHasBeenUsedForXDaysAndProlongedKackOfCleaningCanLeadToTheProliferationOfBacteria),
+                                            useDays);
+                                }
+                                break;
+                        }
+
+                        if (days == 0) {
+                            noticeStr = String.format(
+                                    getString(R.string.catLitterBox_text_itHasBeenUsedForXDaysAndGood), useDays);
+                        }
+
+                        mValue5.setText(noticeStr);
+                        mCleanTime.setText(resetDate);
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        Log.e("ApiService", "Error: " + e.getMessage());
+                    }
+                });
+    }
+
+    // 设备维护（频率天数）
+    private void devicesMaintainRestDays() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        params.put("eventKey", eventKey);
+        params.put("days", days);
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.devicesMaintainRestDays(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<HttpSuccessModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull HttpSuccessModel model) {
+                        devicesMaintainList();
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+
+                    }
+                });
+    }
+
+    // 设备维护复位
+    private void devicesMaintainRest() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        params.put("eventKey", eventKey);
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.devicesMaintainRest(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<HttpSuccessModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull HttpSuccessModel model) {
+                        CustomToast.showCustomToast(mContext, model.getMsg(), Gravity.CENTER, 0, 0, Toast.LENGTH_SHORT);
+                        devicesMaintainList();
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+
+                    }
+                });
+    }
+
+    // 猫砂商品列表
+    private void catDeviceGoodsLitterList() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.catDeviceGoodsLitterList(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<CatDeviceGoodsLitterListModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull CatDeviceGoodsLitterListModel model) {
+                        catGoodsLitterList = model.getData().getList();
+                        catDeviceGoodsLitterListHAdapter.setList(catGoodsLitterList);
+
+                        for (int i = 0; i < catGoodsLitterList.size(); i++) {
+                            catGoodsLitterList.get(i).setTypeKey("catLitterType_title" + (i + 1));
+                        }
+
+                        int curLitterPosition = -1;
+                        // 判断当前设置的猫砂是第几位
+                        for (int i = 0; i < catGoodsLitterList.size(); i++) {
+                            if (catGoodsLitterList.get(i).getName().equals(curCatLitter)) {
+                                curLitterPosition = i;
+                                catGoodsLitterList.get(i).setSelect(true);
+                                Glide.with(mContext)
+                                        .asBitmap() // some .jpeg files are actually gif
+                                        .load(catGoodsLitterList.get(i).getPic())
+                                        .apply(new RequestOptions()
+                                                .centerCrop())
+                                        .into(mLitterGoodsImg);
+                                mLitterGoodsName.setText(
+                                        ModelUtils.getTextByKey(mContext, catGoodsLitterList.get(i).getName()));
+                                mLitterGoodsDes.setText(
+                                        ModelUtils.getTextByKey(mContext, catGoodsLitterList.get(i).getRemark()));
+                                buyUrl = catGoodsLitterList.get(i).getBuyUrl();
+                                curSwitchGoodName = ModelUtils.getTextByKey(mContext,
+                                        catGoodsLitterList.get(i).getName());
+                                modelLinearSmoothScroll(i);
+                            }
+                        }
+
+                        if (catGoodsLitterList.size() > 0 && curLitterPosition == -1) { // 设置第一个猫砂样式
+                            catGoodsLitterList.get(0).setSelect(true);
+                            Glide.with(mContext)
+                                    .asBitmap() // some .jpeg files are actually gif
+                                    .load(catGoodsLitterList.get(0).getPic())
+                                    .apply(new RequestOptions()
+                                            .centerCrop())
+                                    .into(mLitterGoodsImg);
+                            mLitterGoodsName
+                                    .setText(ModelUtils.getTextByKey(mContext, catGoodsLitterList.get(0).getName()));
+                            mLitterGoodsDes
+                                    .setText(ModelUtils.getTextByKey(mContext, catGoodsLitterList.get(0).getRemark()));
+                            buyUrl = catGoodsLitterList.get(0).getBuyUrl();
+                            curSwitchGoodName = ModelUtils.getTextByKey(mContext, catGoodsLitterList.get(0).getName());
+                            catLitterView();
+                        }
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        Log.e("ApiService", "Error: " + e.getMessage());
+                    }
+                });
+    }
+
+    // 获取设备猫砂
+    private void devicesCatLitterInfo() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.devicesCatLitterInfo(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<DevicesCatLitterModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull DevicesCatLitterModel model) {
+                        curCatLitter = model.getData().getName();
+                        mCurCatLitter.setText(curCatLitter);
+
+                        catDeviceGoodsLitterList();
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        Log.e("ApiService", "Error: " + e.getMessage());
+                    }
+                });
+    }
+
+    // 猫砂保存
+    private void devicesCatLitter() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("deviceSerial", device_model.getDeviceSerial());
+        params.put("name", curCatLitter);
+        Map<String, Object> map = ApiClient.createParam(params);
+        apiService.devicesCatLitter(map)
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(new SingleObserver<HttpSuccessModel>() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+
+                    }
+
+                    @Override
+                    public void onSuccess(@NonNull HttpSuccessModel model) {
+                        Gson gson = new Gson();
+                        String json = gson.toJson(model); // 将 model 转换为 JSON 字符串
+                        Log.e("ApiService", "Posts: " + json);
+
+                        if (model.getCode().equals("200")) {
+                            devicesCatLitterInfo();
+                            catLitterView();
+                        }
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        Log.e("ApiService", "Error: " + e.getMessage());
+                    }
+                });
+    }
 ```
 
 6。综上所述：我只需要改这个设备数据透传接口，其他用的都是新的接口。
