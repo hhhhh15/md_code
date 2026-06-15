@@ -37,8 +37,8 @@
 ——迁移的是100a+的物模型，所以用refill_litter_status
 
 -------------------------------------------------------------------------------
-4.这个 updateThingModelUI()中是父类HRBaseActivity中在oncreate()方法中的 fetchProductsThingMode()就被调用了，所以是最新的
-那updateActionDisplayList()必须要关联啊
+4.这个 updateThingModelUI()在父类HRBaseActivity.oncreate()方法中的 fetchProductsThingMode()就被调用了，所以是最新的。然后更新HRCatLitterBoxActivity.updateActionDisplayList()
+
 ```java
 //updateThingModel
 //1.存所有按钮的identifier，然后过滤剩下当前设备物模型有的按钮
@@ -108,16 +108,113 @@ override fun updateThingModelUI() {
 ```java
 
 //HRBaseDeviceActivity中获取到的物模型全量，然后存储到thingModel变量里面，之后继承这个HRBaseDeviceActivity页面都可以用这个thingModel变量调用getProperty()方法获取到啥来着
+
 /**
-     * 获取产品物模型定义 (异步)
+     * 获取单个设备的物模型 (做了缓存处理)
+     * @param deviceName 设备序列号
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun fetchDeviceThingModel(
+        lifecycleOwner: LifecycleOwner,
+        deviceName: String,
+        callback: HmNetworkCallback<HrProductsThingModel?>? = null,
+        isHandlerError: Boolean = false,
+    ) {
+        val versionKey = SPConstant.KEY_THING_MODEL_VERSION_PREFIX + deviceName
+        val dataKey = SPConstant.KEY_THING_MODEL_DATA_PREFIX + deviceName
+        val localVersion = SPUtils.getInstance().getString(versionKey)
+
+        lifecycleOwner.scopeNetLife {
+            val res = Get<HMBaseResponse<HrProductsThingModel?>?>(HmApi.fetchDeviceThingModel(deviceName)) {
+                setQuery("version", localVersion.orEmpty())
+            }.await()
+
+            val remoteVersion = res?.version
+            val remoteData = res?.data
+
+            // 如果后端返回了新数据，且版本不一致，则更新缓存
+            if (remoteData != null && remoteVersion != localVersion) {
+                // 1. 缓存物模型版本号
+                if (!remoteVersion.isNullOrEmpty()) {
+                    SPUtils.getInstance().put(versionKey, remoteVersion)
+                }
+
+                // 2. 缓存物模型数据
+                val singleJson = Gson().toJson(remoteData)
+                SPUtils.getInstance().put(dataKey, singleJson)
+
+                callback?.onSuccess(remoteData)
+            }
+        }.catch {
+            if (it is Exception) {
+                callback?.onError(it)
+            }
+            if (isHandlerError) {
+                handleError(it)
+            }
+        }
+    }
+        /**
+     * 获取产品物模型定义 (异步) HRBaseDeviceActivity.fetchProductsThingMode()
      */
     protected fun fetchProductsThingMode() {
         val pk = productKey.lowercase()
+        val sn = deviceSerial
+
+        // 0. 优先尝试获取单个设备的物模型 (设备维度缓存 + 实时更新)
+        if (sn.isNotEmpty()) {
+            val deviceDataKey = SPConstant.KEY_THING_MODEL_DATA_PREFIX + sn
+            val deviceCachedJson = SPUtils.getInstance().getString(deviceDataKey)
+            var hasDeviceCache = false
+
+            // 先尝试查设备级缓存，如果查到就直接用
+            if (!deviceCachedJson.isNullOrEmpty()) {
+                try {
+                    val cachedModel = Gson().fromJson(deviceCachedJson, HrProductsThingModel::class.java)
+                    if (cachedModel != null) {
+                        thingModel = cachedModel
+                        updateThingModelUI()
+                        hasDeviceCache = true
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            // 补充兜底逻辑：如果设备专属缓存不存在或加载失败，先尝试用产品维度的兜底（SP/Assets）占位
+            if (!hasDeviceCache) {
+                fetchProductThingModelFallback(pk)
+            }
+
+            // 无论是否有缓存，都同步去调用接口，去更新数据
+            HmCommonNetUtils.fetchDeviceThingModel(this, sn, object : HmNetworkCallback<HrProductsThingModel?> {
+                override fun onSuccess(result: HrProductsThingModel?) {
+                    if (result != null) {
+                        thingModel = result
+                        updateThingModelUI()
+                    }
+                }
+
+                override fun onError(error: Exception) {
+
+                }
+            })
+        } else {
+            // 没有序列号，直接走产品维度逻辑
+            fetchProductThingModelFallback(pk)
+        }
+    }
+
+    /**
+     * 兜底逻辑：尝试从产品维度 SP 缓存或 Assets 核心库读取
+     */
+    private fun fetchProductThingModelFallback(pk: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             val dataKey = SPConstant.KEY_THING_MODEL_DATA_PREFIX + pk
             val cachedJson = SPUtils.getInstance().getString(dataKey)
 
-            // 1. 尝试从 SharedPreference 缓存读取
+            // 1. 尝试从 SharedPreference 缓存读取 (产品维度)
             if (!cachedJson.isNullOrEmpty()) {
                 try {
                     val cachedModel = Gson().fromJson(cachedJson, HrProductsThingModel::class.java)
@@ -147,7 +244,6 @@ override fun updateThingModelUI() {
                                 thingModel = model
                                 updateThingModelUI()
                             }
-                            return@launch
                         }
                     }
                 }
@@ -156,7 +252,7 @@ override fun updateThingModelUI() {
             }
         }
     }
-    
+
     /**
      * 物模型加载成功后的解析回调
      */
