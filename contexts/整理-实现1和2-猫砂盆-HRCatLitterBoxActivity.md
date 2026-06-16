@@ -277,14 +277,6 @@ override fun updateThingModelUI() {
 
 ## 2. 我的疑问（不懂的地方）
 
-> ❓ Q1: 点击集便箱余量的按钮，100a 和 75v 用的是同一个吗？因为跳转的页面不一样，是否要区分两个集便箱余量按钮？
->
-> ✅ A1: 按钮一样，我弄成 id 不一样的。
-
-> ❓ Q2: 砂仓余量跳转，新页面跳转到旧页面，调用透传接口为啥用不了，这个方法不是直接下发接口的吗，是不是参数没有填写完整？
->
-> ✅ A2: 跳转的逻辑还得看旧页面时怎么跳转的。只用看一点，就是跳转要传入一个 `device_model`。
-
 > ❓ Q3: 余量 UI 的显示是要查看属性值的，所调用的接口是什么？
 >
 > ✅ A3: 调用的是 `HmCommonNetUtils` 中的 `fetchDeviceProperty()`，但不直接用，套一层用 `HRBaseDeviceActivity` 中的 `fetchDeviceProperty()`。
@@ -306,8 +298,25 @@ HRBaseDeviceActivity.fetchDeviceProperty(useCache)
 
 ### 4.1 封装接口 HmCommonNetUtils 网络请求
 
+API: GET /v1/devices/$device_name/properties
+返回响应数据：
+{
+    "data": {
+        "bed_heater_switch": false,
+        "bed_target_temp": 25,
+        "mode": 0,
+        "switch": false,
+        "target_temp": 21,
+        "voice_level": 0,
+        "voice_switch": true,
+        "online_status": true
+    }
+}
+物模型属性值
+
+
 ```java
-// API: GET /v1/devices/{deviceName}/property
+// API: GET /v1/devices/$device_name/properties
 @JvmStatic
 @JvmOverloads
 fun fetchDeviceProperty(
@@ -348,6 +357,9 @@ fun fetchDeviceProperty(
 ```
 
 ### 4.2 HRBaseDeviceActivity 封装层
+
+Kotlin 的命名参数允许跳过有默认值的参数。
+    HmCommonNetUtils.fetchDeviceProperty()方法中的参数isHandlerError: Boolean = false有默认值false，所以可以跳过
 
 ```java
 protected fun fetchDeviceProperty(useCache: Boolean = true) {
@@ -442,14 +454,15 @@ override fun onPropertyUpdate(result: Map<String, Any?>) {
 ### 5.3 按钮跳转
 
 ```java
-listOf(mBind.rlSurplus1 to 0, mBind.rlSurplus2 to 1).forEach { (view, type) ->
-    view.singleClick {
-        val intent = Intent(this, DeviceCatLitterBoxSurplusActivity::class.java)
-        intent.putExtra("device_model", deviceModel)
-        intent.putExtra("type", type)
-        startActivity(intent)
+
+    listOf(mBind.rlSurplus1 to 0,mBind.rlSurplus2 to 1).forEach {(view, type) ->
+        view.singleClick {
+            val intent = Intent(this, DeviceCatLitterBoxSurplus3Activity::class.java)
+            intent.putExtra("device_model", deviceModel)
+            intent.putExtra("type", type)
+            startActivity(intent)
+        }  
     }
-}
 ```
 
 ## 6. device_model 数据来源
@@ -497,7 +510,7 @@ private fun getDeviceList() {
 
 # 🏁 踩坑记录汇总
 
-| 日期  | 坑点                                     | 原因                   | 解决方案                                    |
+| 日期  | 坑点                                   | 原因                   | 解决方案                                    |
 |-------|------------------------------------------|------------------------|---------------------------------------------|
 | 5.20  | `<include>` 标签 binding 用不了           | 没写 `android:id`       | 必须写 id，有 id 就加一层                    |
 | 5.25  | 100a/100a+ 余量物模型标识符不同           | 迁移的是 100a+ 物模型   | 用 `refill_litter_status`，废弃旧版          |
