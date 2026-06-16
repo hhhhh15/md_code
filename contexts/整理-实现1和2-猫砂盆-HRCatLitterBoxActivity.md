@@ -515,3 +515,605 @@ private fun getDeviceList() {
 | 5.20  | `<include>` 标签 binding 用不了           | 没写 `android:id`       | 必须写 id，有 id 就加一层                    |
 | 5.25  | 100a/100a+ 余量物模型标识符不同           | 迁移的是 100a+ 物模型   | 用 `refill_litter_status`，废弃旧版          |
 | 5.25  | 余量页面跳转后 `device_model` 为空        | 忘记 Intent 传参        | `intent.putExtra("device_model", deviceModel)` |
+
+---
+
+# 💀 实现3：属性轮询与设备特征识别
+
+## 1. 需求描述
+根据设备序列号动态获取设备属性值列表，识别设备硬件特征（如是否有摄像头），并将属性数据分发到各个 UI 模块进行状态更新。
+
+## 2. 关键代码链路
+
+```
+属性轮询 (HRBaseDeviceActivity.startPropertyPolling)
+  └→ HRBaseDeviceActivity.fetchDeviceProperty(useCache)
+       └→ HmCommonNetUtils.fetchDeviceProperty(lifecycleOwner, deviceName, callback, isHandlerError, useCache)
+            ├→ 1. 先读缓存 (CacheMode.READ)
+            └→ 2. 再请求网络 (CacheMode.WRITE)
+                 └→ API: GET /v1/devices/{deviceName}/properties
+  └→ 回调 onPropertyUpdate(result: Map<String, Any?>)
+       ├→ A. 传感器数据更新（余量状态文字/颜色）→ 见实现2
+       ├→ B. 任务状态解析 handleDeviceTaskStatus(result) → 见实现4
+       ├→ C. 基础设置状态同步（自动清理/幼猫保护/掩埋/风扇）
+       ├→ D. 摄像头配套属性同步（补光灯/摄像头/麦克风）
+       └→ E. 离线遮罩 + Fragment 状态同步
+```
+
+## 3. 轮询机制详解（HRBaseDeviceActivity）
+
+### 3.1 轮询启动
+
+```java
+// HRCatLitterBoxActivity.initView() 末尾启动
+startPropertyPolling()   // 属性轮询，间隔 2s
+startEventPolling()      // 事件轮询，间隔 5s
+```
+
+### 3.2 轮询实现
+
+```java
+
+private var pollingPropertyJob: Job? = null
+private var pollingEventJob: Job? = null
+
+
+// HRBaseDeviceActivity — 属性轮询
+protected fun startPropertyPolling(intervalMs: Long = 2000L) {
+    pollingPropertyJob?.cancel()
+    pollingPropertyJob = lifecycleScope.launch {
+        repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                fetchDeviceProperty(useCache = false)
+                delay(intervalMs)
+            }
+        }
+    }
+}
+
+// HRBaseDeviceActivity — 事件轮询
+protected fun startEventPolling(intervalMs: Long = 5000L) {
+    pollingEventJob?.cancel()
+    pollingEventJob = lifecycleScope.launch {
+        repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                fetchDeviceEvents()
+                delay(intervalMs)
+            }
+        }
+    }
+}
+```
+
+### 3.3 协程与 Job 机制梳理
+
+轮询的本质：在 `lifecycleScope`（SupervisorJob）里启动协程，`repeatOnLifecycle` 跟随 Activity 生命周期，`while + delay` 实现循环。
+
+**层级拆解：**
+
+```
+lifecycleScope (SupervisorJob 协程域，与 Activity 生命周期绑定)
+  └→ launch {} → 返回 Job (pollingPropertyJob)
+       └→ repeatOnLifecycle(RESUMED) → 监听 Activity 生命周期
+            └→ while(isActive) { fetch(); delay() } → 循环体
+```
+
+三层各司其职：
+- `lifecycleScope` + SupervisorJob = 协程域，一个子协程崩了不影响其他兄弟协程
+- `repeatOnLifecycle(RESUMED)` = Activity 生命周期保护（切后台停，回来继续）
+- `while + delay` = 循环（轮询）
+- 三个组合 = 安全的轮询
+
+**关键对象说明：**
+
+`isActive` 不是变量，是协程内部属性，通过 `kotlin.coroutines.isActive` import
+
+| 对象 | 类型 | 作用 |
+|------|------|------|
+| `lifecycleScope` | CoroutineScope (SupervisorJob) | Activity 协程域，DESTROYED 时取消所有子协程；子协程互不干扰 |
+| `launch {}` | 返回 Job | 启动一个新协程，Job 可用于 cancel() 取消 |
+| `pollingPropertyJob` | Job? | 协程的句柄，用于手动停止轮询 |
+| `repeatOnLifecycle(RESUMED)` | 挂起函数 | 监听 Activity 生命周期，RESUMED 时启动，离开时取消，回来时重建 |
+| `isActive` | 协程内部属性 | 协程未被取消时为 true，cancel() 后变 false 退出循环 |
+| `delay(2000)` | 挂起函数 | 非阻塞等待 2s，期间协程挂起，不占线程 |
+
+**轮询的完整生命周期：**
+
+```
+Activity.onCreate()
+  └→ Activity 可见 → RESUMED
+       └→ repeatOnLifecycle 启动循环 → while(isActive) { fetch → delay → fetch → ... }
+            │
+            ├→ 用户切后台 → STOPPED → repeatOnLifecycle 自动取消循环
+            ├→ 用户回来 → RESUMED → repeatOnLifecycle 重新启动循环
+            ├→ 调用 stopPropertyPolling() → pollingPropertyJob.cancel() → isActive=false → 退出循环
+            └→ Activity.onDestroy() → lifecycleScope 取消所有协程 → 自动退出
+```
+
+**为什么先 cancel 再 launch？**
+
+```kotlin
+pollingPropertyJob?.cancel()  // 防止重复启动
+pollingPropertyJob = lifecycleScope.launch { ... }
+```
+
+防止 `startPropertyPolling()` 被多次调用时产生多个轮询协程同时跑。
+
+### 3.4 HRBaseDeviceActivity.onCreate() 初始化vs轮询顺序先后
+
+```java
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    fetchMemberType(familyId)        // 1. 获取成员权限
+    fetchProductsThingMode()          // 2. 加载物模型 → updateThingModelUI()
+    fetchDeviceProperty(useCache = false)  // 3. 首次拉取属性（不等轮询）
+}
+// initView() 由子类实现，轮询在子类 initView() 末尾启动
+
+所以轮询调用顺序是在子类，比接口晚
+
+```
+
+### 3.5 防回跳保护与轮询的配合
+
+`onPropertyUpdate()` 中通过 `isActionProtecting()` 判断是否跳过 `handleDeviceTaskStatus()`，避免轮询旧数据覆盖 Mock 状态。详见 **实现4 第8节 防回跳保护机制**。
+
+## 4. 设备特征识别自研设备进入才能进入到该页面（ProductUtils）
+
+通过设备序列号（productKey）查询产品信息，判断设备硬件特征：
+
+```java
+// initView() 中获取产品信息
+val product = withContext(Dispatchers.IO) {
+    ProductUtils.getProductByDeviceSerial(productKey)
+}
+hasCamera = product?.is_ipc == true
+```
+
+```java
+// ProductUtils：PK 是产品系列标识，SN 是具体设备标识
+object ProductUtils {
+    const val MODEL_CAT_LITTER_BOX_A1 = "A9015201"  // 75v
+    const val MODEL_CAT_LITTER_BOX_A2 = "A9015202"
+    const val MODEL_CAT_LITTER_BOX_B1 = "B9015201"  // 100a
+    const val MODEL_CAT_LITTER_BOX_B2 = "B9015202"  // 100a+
+
+    fun isSelfDevelopedCatLitterBox(model: String?): Boolean {
+        val m = model?.uppercase(Locale.getDefault())
+        return m == MODEL_CAT_LITTER_BOX_A1 || m == MODEL_CAT_LITTER_BOX_A2 ||
+               m == MODEL_CAT_LITTER_BOX_B1 || m == MODEL_CAT_LITTER_BOX_B2
+    }
+
+        /**
+     * 根据设备序列号获取产品信息
+     */
+    fun getProductByDeviceSerial(deviceSerial: String?): Product? {
+        val processedSerialKey = deviceSerial
+            ?.substringBefore(":")
+            ?.uppercase(Locale.getDefault())
+            .orEmpty()
+
+        val spJson = SPUtils.getInstance().getString(SPConstant.KEY_GET_PRODUCT_JSON, "")
+        return spJson.takeIf { !it.isNullOrEmpty() }
+            ?.let {
+                runCatching {
+                    GsonUtils.fromJson<List<CategoryProductData?>?>(
+                        it,
+                        object : TypeToken<List<CategoryProductData?>?>() {}.type
+                    )
+                }.getOrNull()
+            }
+            ?.let { flattenCategoryProducts(it) }
+            ?.find { product ->
+                product.product_keys?.any { key ->
+                    key.equals(processedSerialKey, ignoreCase = true)
+                } == true
+            }
+    }
+}
+```
+
+## 5. onPropertyUpdate() 分发总览
+
+轮询拿到属性数据后，`onPropertyUpdate()` 是中枢分发站，具体代码在各实现里：
+
+| 分段 | 处理内容 | 受防回跳保护 | 详细代码位置 |
+|------|----------|-------------|-------------|
+| A | 余量传感器数据（砂仓/补砂桶/集便箱） | 否 | 实现2 第5.2节 |
+| B1 | 任务状态 `handleDeviceTaskStatus()` | **是** | 实现4 第5节 + 第8节 |
+| B2 | 基础设置（自动清理/幼猫保护/掩埋/风扇） | **是** | 同步到 Fragment 状态卡片 |
+| C | 摄像头属性（补光灯/摄像头开关/麦克风/摄像头状态） | 否 | 同步到直播 Fragment |
+| D | 离线遮罩 | 否 | 一行判断 |
+
+防回跳保护的完整判断逻辑见 **实现4 第8.4节**。
+
+
+---
+
+# 💀 实现4：任务状态 UI 控制（底部操作栏 + 标题栏）
+
+## 1. 需求描述
+根据设备上报的 `current_task.task_type` 和 `current_task.task_status`，控制底部操作栏和任务执行面板的显隐，以及标题栏状态文案的显示。
+
+## 2. 核心概念：上报 vs 下发
+
+| 方向 | 含义 | 涉及的物模型 | 代码入口 |
+|------|------|-------------|----------|
+| 上报 | 设备上报状态到云端，我们轮询查询 | `current_task`（含 `task_type` + `task_status`） | `fetchDeviceProperty()` → `onPropertyUpdate()` → `handleDeviceTaskStatus()` |
+| 下发 | 我们向设备发送控制指令 | `remote_control_task`（含 `action`） | `handleActionClick()` → `invokeCatLitterService()` → `invokeDeviceService()` |
+
+## 3. DeviceTaskType 与 DeviceTaskStatus 枚举
+
+```java
+enum class DeviceTaskType(val code: String) {
+    IDLE("idle"),           // 空闲
+    CLEANING("cleaning"),   // 自动清理/铲屎中
+    REFILLING("refilling"), // 补砂中 (100a+)
+    EMPTYING("emptying"),   // 清砂/一键排空猫砂
+    SMOOTHING("leveling"),  // 平整猫砂/抚平
+    MAINTAINING("maintaining"), // 维护模式（开口朝上）
+    RESETTING("resetting"); // 设备复位/校准中
+}
+
+enum class DeviceTaskStatus(val code: Int) {
+    IDLE(0),       // 待机/就绪
+    RUNNING(1),    // 正在执行
+    PAUSED(2),     // 已暂停
+    COMPLETED(3),  // 已完成
+    FAILED(4),     // 异常失败
+    CANCELLED(5);  // 手动取消
+}
+```
+
+## 4. task_type 75v和100a+设备相同物模型不同索引的映射机制
+
+设备上报的 `task_type` 是数字索引（如 75v 、100a+的相同物模型不同索引），所以需要根据物模型 `specs.enum` 翻译为标准 Code：
+
+```java
+private fun getTaskTypeCodeFromSpecs(rawCode: Any?): String {
+    // 1. 解析为整型索引
+    val index = when (rawCode) {
+        is Number -> rawCode.toInt()
+        is String -> rawCode.toIntOrNull()
+        else -> null
+    }
+    // 2. 优先从物模型 specs.enum 翻译
+    if (index != null) {
+        val enumList = thingModel?.getProperty(DevicePropertyConstants.TASK_TYPE)?.specs?.enum
+        if (enumList != null && index >= 0 && index < enumList.size) {
+            return enumList[index]
+        }
+        // 兜底硬编码映射
+        return when (index) {
+            0 -> "idle"; 
+            1 -> "cleaning"; 
+            2 -> "refilling"
+            3 -> "emptying"; 
+            4 -> "leveling"; 
+            5 -> "maintaining"
+            6 -> "resetting"; 
+            else -> "idle"
+        }
+    }
+    // 3. Mock 传入的字符串（如 "cleaning"）直接返回
+    return (rawCode as? String) ?: "idle"
+}
+```
+
+## 5. handleDeviceTaskStatus() — 任务面板 UI 控制
+
+核心逻辑：根据 `taskType` + `taskStatus` 的组合决定底部显示哪个面板。
+
+### 5.1 面板切换规则
+
+```
+活跃任务（显示 sllCurrentTask，隐藏 llBottomControl）：
+  ├→ CLEANING/EMPTYING/SMOOTHING/RESETTING/REFILLING 且 RUNNING/PAUSED
+  └→ MAINTAINING 且 IDLE（已完成开口朝上，需显示复位按钮）
+
+空闲状态（显示 llBottomControl，隐藏 sllCurrentTask）：
+  └→ 其余所有情况
+```
+
+### 5.2 开口朝上的三步状态流转
+
+```
+步骤1: 开口朝上运行中 (MAINTAINING + RUNNING)
+  → 取消按钮变"复位"，灰色不可点
+  → 暂停/继续按钮正常
+
+步骤2: 已完成开口朝上 (MAINTAINING + IDLE)
+  → 复位按钮可点
+  → 暂停/继续按钮隐藏
+  → 中间文字："已完成开口朝上"
+
+步骤3: 开口复位中 (RESETTING + RUNNING)
+  → 复位按钮隐藏
+  → 暂停/继续按钮正常显示
+```
+
+### 5.3 完整代码
+
+```java
+private fun handleDeviceTaskStatus(result: Map<String, Any?>) {
+    val currentTaskObj = result[DevicePropertyConstants.CURRENT_TASK]
+    var taskTypeCode = "idle"
+    var taskStatusCode = 0
+
+    if (currentTaskObj is Map<*, *>) {
+        val rawTaskType = currentTaskObj[DevicePropertyConstants.TASK_TYPE]
+        taskTypeCode = getTaskTypeCodeFromSpecs(rawTaskType)
+        taskStatusCode = (currentTaskObj[DevicePropertyConstants.TASK_STATUS] as? Number)?.toInt() ?: 0
+    }
+
+    this.taskType = DeviceTaskType.fromCode(taskTypeCode)
+    this.taskStatus = DeviceTaskStatus.fromCode(taskStatusCode)
+    this.isCatInside = (result[DevicePropertyConstants.CAT_INSIDE] as? Boolean) == true
+    this.isCatNear = (result[DevicePropertyConstants.CAT_NEARBY] as? Boolean) == true
+
+    // 判断是否显示任务面板
+    val showTaskPanel = (
+        (taskType in listOf(CLEANING, EMPTYING, SMOOTHING, RESETTING, REFILLING, MAINTAINING) &&
+         taskStatus in listOf(RUNNING, PAUSED))
+        || (taskType == MAINTAINING && taskStatus == IDLE)  // 已完成开口朝上
+    )
+
+    if (showTaskPanel) {
+        mBind.llBottomControl.visibility = View.GONE
+        mBind.sllCurrentTask.visibility = View.VISIBLE
+
+        // 默认状态：取消可点，暂停/继续可点
+        mBind.llCancel.visibility = View.VISIBLE
+        mBind.llContinuePause.visibility = View.VISIBLE
+        mBind.llCancel.alpha = 1.0f; mBind.llCancel.isEnabled = true
+        mBind.llContinuePause.alpha = 1.0f; mBind.llContinuePause.isEnabled = true
+        mBind.tvCancelDesc.text = getString(R.string.catlitterbox_button_cancel)
+
+        // 特殊状态覆盖
+        when {
+            taskType == MAINTAINING && taskStatus == IDLE -> {
+                // 步骤2：已完成开口朝上
+                mBind.llContinuePause.visibility = View.GONE
+                mBind.tvCancelDesc.text = getString(R.string.catlitterbox_text_reset)
+                mBind.ivCancelIcon.setImageResource(R.mipmap.ic_open_up_reset)
+                mBind.tvEventDesc.text = getString(R.string.catlitterbox_text_status_open_up_completed)
+            }
+            taskType == RESETTING -> {
+                // 步骤3：复位中
+                mBind.llCancel.visibility = View.GONE
+            }
+            taskType == MAINTAINING -> {
+                // 步骤1：开口朝上运行/暂停中
+                mBind.tvCancelDesc.text = getString(R.string.catlitterbox_text_reset)
+                mBind.llCancel.alpha = 0.5f; mBind.llCancel.isEnabled = false
+            }
+        }
+
+        // 猫咪靠近/进入 → 全部置灰
+        if (isCatInside || isCatNear) {
+            mBind.tvEventDesc.text = if (isCatInside) "猫咪在仓内，已暂停" else "猫咪靠近，已暂停"
+            mBind.llCancel.alpha = 0.5f; mBind.llCancel.isEnabled = false
+            mBind.llContinuePause.alpha = 0.5f; mBind.llContinuePause.isEnabled = false
+            mBind.tvPauseContinue.text = "继续"
+            mBind.ivPauseContinue.setImageResource(R.mipmap.ic_equipment_continue)
+        } else if (taskStatus == PAUSED) {
+            mBind.tvEventDesc.text = "设备暂停中"
+            mBind.tvPauseContinue.text = "继续"
+            mBind.ivPauseContinue.setImageResource(R.mipmap.ic_equipment_continue)
+        } else {
+            // 运行中：根据任务类型显示文案
+            mBind.tvEventDesc.text = when (taskType) {
+                RESETTING -> "复位中"; CLEANING -> "清理中"
+                EMPTYING -> "清砂中"; REFILLING -> "补砂中"
+                MAINTAINING -> "开口朝上中"; else -> "抚平中"
+            }
+            mBind.tvPauseContinue.text = "暂停"
+            mBind.ivPauseContinue.setImageResource(R.mipmap.ic_equipment_on)
+        }
+
+        // 左侧图标
+        mBind.ivEventIcon.setImageResource(when (taskType) {
+            RESETTING -> R.mipmap.ic_quick_operation_reset
+            CLEANING -> R.mipmap.ic_quick_operation_clean_up
+            EMPTYING -> R.mipmap.ic_quick_operation_empty_the_cat_litter
+            REFILLING -> R.mipmap.ic_quick_manual_san_replenishment
+            MAINTAINING -> R.mipmap.ic_quick_open_upwards
+            else -> R.mipmap.ic_quick_operation_smooth_out
+        })
+    } else {
+        // 空闲：显示底部操作栏
+        mBind.llBottomControl.visibility = View.VISIBLE
+        mBind.sllCurrentTask.visibility = View.GONE
+    }
+    updateTitleStatus()
+}
+```
+
+## 6. updateTitleStatus() — 标题栏状态
+
+```
+优先级：离线 > 有任务（暂停 > 运行）> 无任务（如厕中 > 在线）
+
+离线        → "离线"
+有任务暂停  → "设备暂停中"
+有任务运行  → 根据任务类型显示（清理中/清砂中/抚平中/维护中/补砂中/复位中）
+猫在仓内    → "猫咪如厕中"
+空闲在线    → "在线"
+```
+
+## 7. 操作下发流程
+
+### 7.1 快捷操作（handleActionClick → invokeCatLitterService）
+
+点击按钮 → 弹确认框 → 调用 `invokeCatLitterService()` → 下发服务 → 成功后 Mock 状态立即更新 UI：
+
+```java
+// 下发服务接口
+// API: POST /v1/devices/{deviceName}/service/{identifier}
+// 请求体: { "data": { ...params } }
+// 返回: { "result": 0 }  // 0 表示成功
+
+private fun invokeCatLitterService(
+    serviceId: String,              // 服务标识
+    params: Map<String, Any?> = mapOf(),
+    actionName: String? = null,     // Toast 提示名
+    mockTaskType: String? = null,   // 成功后模拟的 task_type
+    mockTaskStatus: Int? = null     // 成功后模拟的 task_status
+) {
+    invokeDeviceService(serviceId, params, object : HmNetworkCallback<Any?> {
+        override fun onSuccess(result: Any?) {
+            if (result is Map<*, *>) {
+                val resultCode = (result["result"] as? Number)?.toInt() ?: -1
+                if (resultCode == 0) {
+                    markActionTime()  // 防回跳保护
+                    actionName?.let { Toaster.show("已下发${it}指令") }
+                    if (mockTaskType != null && mockTaskStatus != null) {
+                        handleDeviceTaskStatus(mapOf(
+                            DevicePropertyConstants.CURRENT_TASK to mapOf(
+                                DevicePropertyConstants.TASK_TYPE to mockTaskType,
+                                DevicePropertyConstants.TASK_STATUS to mockTaskStatus
+                            )
+                        ))
+                    }
+                } else {
+                    Toaster.show(CatLitterBoxTaskResult.getMsg(resultCode))
+                }
+            }
+        }
+        override fun onError(error: Exception) {}
+    })
+}
+```
+
+### 7.2 任务控制（invokeCatLitterBoxService）
+
+任务面板上的"暂停/继续/取消/复位"按钮，统一走 `remote_control_task` 服务：
+
+```java
+private fun invokeCatLitterBoxService(action: Int) {
+    val mockStatus = when (action) {
+        0 -> DeviceTaskStatus.PAUSED.code    // 暂停
+        1 -> DeviceTaskStatus.RUNNING.code   // 继续
+        2 -> DeviceTaskStatus.RUNNING.code   // 取消 → 复位运行中
+        3 -> DeviceTaskStatus.RUNNING.code   // 开口复位 → 复位运行中
+        else -> DeviceTaskStatus.IDLE.code
+    }
+    val mockType = when (action) {
+        2, 3 -> DeviceTaskType.RESETTING.code  // 取消/复位 → 任务类型变复位
+        else -> taskType.code
+    }
+    invokeCatLitterService(
+        serviceId = "remote_control_task",
+        params = mapOf("action" to action),
+        mockTaskType = mockType,
+        mockTaskStatus = mockStatus
+    )
+}
+```
+
+### 7.3 action 值映射
+
+| action | 含义 | 调用场景 |
+|--------|------|----------|
+| 0 | 暂停 | 任务运行中点击"暂停" |
+| 1 | 继续 | 任务暂停中点击"继续" |
+| 2 | 取消 | 非 MAINTAINING 任务点击"取消" |
+| 3 | 开口复位 | MAINTAINING 完成后点击"复位" |
+
+## 8. 防回跳保护机制
+
+### 8.1 完整数据链路（轮询 × 下发 的交叉点）
+
+防回跳是轮询（实现3）和下发服务（实现4）的交叉逻辑。下发改变状态，轮询读取状态，两者时序不一致就会出问题。
+
+```
+┌─ 下发链路（实现4）────────────────────────────────────────────┐
+│  用户点击"清理"                                                │
+│    → invokeCatLitterService("remote_clean")                    │
+│      → invokeDeviceService() → API 下发                        │
+│        → 成功(result=0)                                        │
+│          → markActionTime()  ← 启动保护                        │
+│          → handleDeviceTaskStatus(Mock数据) ← 立即更新UI        │
+└───────────────────────────────────────────────────────────────┘
+
+┌─ 轮询链路（实现3）────────────────────────────────────────────┐
+│  startPropertyPolling() → 每2s循环                              │
+│    → fetchDeviceProperty(useCache=false)                        │
+│      → HmCommonNetUtils.fetchDeviceProperty()                  │
+│        → API: GET /v1/devices/{sn}/properties                  │
+│          → onSuccess(result) → onPropertyUpdate(result)        │
+│            → if (isActionProtecting()) {  ← 检查保护           │
+│                updateTitleStatus()  // 只更新在线状态            │
+│                // 跳过 handleDeviceTaskStatus()                 │
+│              } else {                                           │
+│                handleDeviceTaskStatus(result) // 正常同步        │
+│              }                                                  │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 问题场景
+
+```
+t=0s  下发"清理"成功 → Mock CLEANING+RUNNING → UI显示"清理中" ✅
+t=1s  轮询返回旧数据 IDLE → 不加保护的话 UI 闪回"在线" ❌ （回跳！）
+t=3s  轮询返回新数据 CLEANING → UI 恢复"清理中" ✅
+      原因：下发→设备执行→上报新状态 整条链路需要几秒，轮询不等人
+```
+
+### 8.3 保护代码（HRBaseDeviceActivity）
+
+```java
+// 保护时间戳
+protected var lastActionTime: Long = 0L
+
+// 下发成功时调用 → 启动保护
+fun markActionTime() {
+    lastActionTime = System.currentTimeMillis()
+}
+
+// 轮询回调时检查 → 是否在保护期
+protected fun isActionProtecting(durationMs: Long = 5000L): Boolean {
+    return System.currentTimeMillis() - lastActionTime < durationMs
+}
+```
+
+### 8.4 onPropertyUpdate 中的保护判断
+
+```java
+override fun onPropertyUpdate(result: Map<String, Any?>) {
+    // A. 传感器数据（余量）→ 不受保护影响，始终更新
+    // ...
+
+    // B. 任务状态 → 受保护控制
+    if (isActionProtecting()) {
+        // 保护期内：只更新在线状态，跳过任务面板
+        updateTitleStatus()
+    } else {
+        // 保护期外：正常同步
+        handleDeviceTaskStatus(result)
+        // 同步基础设置...
+    }
+
+    // C. 摄像头属性 → 不受保护影响，始终更新
+    // ...
+}
+```
+
+### 8.5 触发 markActionTime() 的所有位置
+
+| 调用位置 | 触发时机 |
+|----------|----------|
+| `invokeCatLitterService()` | 下发服务成功后 (result=0) |
+| `updateDeviceProperty()` | 下发属性指令前 (通过父类封装) |
+
+### 8.6 保护期结束后的自然恢复
+
+5s 保护期结束后，设备已真正执行并上报了新状态，轮询拿到的就是最新数据，`handleDeviceTaskStatus()` 正常同步，UI 无缝衔接。
+
+## 9. 踩坑记录
+
+| 日期 | 坑点 | 原因 | 解决方案 |
+|------|------|------|----------|
+| 5.26 | 补砂时 title 不更新 | 下发成功后 Mock 状态，但轮询太快返回旧数据覆盖 | 防回跳保护 `isActionProtecting()` 跳过旧数据 |
+| 5.26 | 75v 上报 task_type 是数字（如 6），不是字符串 | 不同设备物模型规格不同 | `getTaskTypeCodeFromSpecs()` 优先从物模型 specs.enum 翻译，兜底硬编码 |
+| 5.26 | 虚拟设备 device_model 为空 | 虚拟设备上报属性只有 3 个字段，接口返回不完整 | 确认是虚拟设备限制，真机无此问题 |
