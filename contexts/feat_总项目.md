@@ -245,6 +245,8 @@ class MyAdapter {
 
 
 
+## ble低功耗蓝牙配网连接地址
+https://github.com/buhuiming/BleCore?tab=readme-ov-file
 
 
 ## 强制绑定，只有同地区才能实现，否则一定要解绑

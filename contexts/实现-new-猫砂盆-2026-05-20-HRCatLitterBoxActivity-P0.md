@@ -990,7 +990,8 @@ result:
 
 ## 7. 操作下发流程
 
-### 7.1 快捷操作（handleActionClick → invokeCatLitterService）
+### 7.1 快捷操作（handleActionClick 、 onBindViewClick()  → invokeCatLitterService）
+
 
 点击按钮 → 弹确认框 → 调用 `invokeCatLitterService()` → 下发服务 → 成功后 Mock 状态立即更新 UI：
 
@@ -1033,8 +1034,30 @@ private fun invokeCatLitterService(
     })
 }
 ```
+### 7.2 任务面板按钮控制()
 
-### 7.2 任务控制（invokeCatLitterBoxService）
+就算是开集便箱门还是走这个`remote_control_task` 服务下发的，但是方法不是invokeCatLitterBoxService，是            invokeCatLitterService(
+                                    "remote_lid",
+                                    params = mapOf("switch" to true),
+                                    actionName = getString(R.string.catLitterBox_text_openToiletDoor),
+                                )
+记得下发关闭指令，把本地垃圾桶的状态改了。                                
+```java
+    override fun onBindViewClick() {
+...
+   mBind.apply {
+            llCancel.singleClick {
+                if (!checkDeviceOperable()) return@singleClick
+                invokeCatLitterBoxService(2) // 2: 取消
+            }
+
+            llContinuePause.singleClick {
+                if (!checkDeviceOperable()) return@singleClick
+                val action = if (taskStatus == DeviceTaskStatus.PAUSED) 1 else 0 // 1: 继续, 0: 暂停
+                invokeCatLitterBoxService(action)
+            }
+```
+### 7.3 任务控制（invokeCatLitterBoxService）
 
 任务面板上的"暂停/继续/取消/复位"按钮，统一走 `remote_control_task` 服务：
 
